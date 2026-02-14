@@ -1,5 +1,4 @@
 
-
 """
 Inference-only script for running a pretrained policy on a robot.
 
@@ -34,7 +33,13 @@ from lerobot.datasets.utils import build_dataset_frame, combine_feature_dicts
 from lerobot.policies.factory import get_policy_class, make_pre_post_processors
 from lerobot.policies.utils import make_robot_action
 from lerobot.processor import make_default_processors
-from lerobot.robots import make_robot_from_config, RobotConfig
+from lerobot.robots import (  # noqa: F401
+    RobotConfig,
+    make_robot_from_config,
+    so_follower,
+    koch_follower,
+    omx_follower,
+)
 from lerobot.utils.constants import OBS_LANGUAGE_ATTENTION_MASK, OBS_LANGUAGE_TOKENS, OBS_STR
 from lerobot.utils.control_utils import init_keyboard_listener, predict_action
 from lerobot.utils.utils import get_safe_torch_device, init_logging
@@ -44,7 +49,7 @@ from lerobot.utils.visualization_utils import init_rerun, log_rerun_data
 @dataclass
 class InferenceConfig:
     robot: RobotConfig
-    policy: PreTrainedConfig
+    policy: PreTrainedConfig | None = None
     display_data: bool = False
     instruction: str = ""
     fps: int = 25
@@ -56,6 +61,9 @@ class InferenceConfig:
             cli_overrides = parser.get_cli_overrides("policy")
             self.policy = PreTrainedConfig.from_pretrained(policy_path, cli_overrides=cli_overrides)
             self.policy.pretrained_path = policy_path
+
+        if self.policy is None:
+            raise ValueError("A policy must be provided via --policy.path or --policy.type")
 
     @classmethod
     def __get_path_fields__(cls) -> list[str]:
@@ -96,9 +104,9 @@ def tokenize_instruction(policy, instruction: str, device: torch.device) -> tupl
 
         return lang_tokens, lang_masks
     else:
-        # For policies that don't use language tokens, return empty tensors
-        logging.warning("Policy does not support language tokens. Returning empty tensors.")
-        return torch.zeros((1, 1), dtype=torch.long, device=device), torch.ones((1, 1), dtype=torch.bool, device=device)
+        # For policies that don't use language tokens (e.g., ACT), return None
+        logging.info("Policy does not use language tokens.")
+        return None, None
 
 
 @parser.wrap()
@@ -122,12 +130,12 @@ def main(cfg: InferenceConfig):
         aggregate_pipeline_dataset_features(
             pipeline=robot_action_processor,
             initial_features=create_initial_features(action=robot.action_features),
-            use_videos=False,
+            use_videos=True,
         ),
         aggregate_pipeline_dataset_features(
             pipeline=robot_observation_processor,
             initial_features=create_initial_features(observation=robot.observation_features),
-            use_videos=False,
+            use_videos=True,
         ),
     )
 
@@ -182,9 +190,10 @@ def main(cfg: InferenceConfig):
             # Build observation frame from processed observations
             observation_frame = build_dataset_frame(robot_features, obs_processed, prefix=OBS_STR)
 
-            # Add language tokens to observation
-            observation_frame[OBS_LANGUAGE_TOKENS] = lang_tokens
-            observation_frame[OBS_LANGUAGE_ATTENTION_MASK] = lang_masks
+            # Add language tokens to observation (only for VLA policies like SmolVLA)
+            if lang_tokens is not None:
+                observation_frame[OBS_LANGUAGE_TOKENS] = lang_tokens
+                observation_frame[OBS_LANGUAGE_ATTENTION_MASK] = lang_masks
 
             # Predict action using the policy
             action_values = predict_action(
