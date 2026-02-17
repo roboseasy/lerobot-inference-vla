@@ -22,8 +22,6 @@ import logging
 import time
 from dataclasses import dataclass
 
-import torch
-# 코드에서 직접 사용하지 않지만, draccus parser가 카메라 타입을 레지스트리에 등록하기 위해 필요
 from lerobot.cameras.opencv.configuration_opencv import OpenCVCameraConfig  # noqa: F401
 from lerobot.cameras.realsense.configuration_realsense import RealSenseCameraConfig  # noqa: F401
 from lerobot.configs import parser
@@ -40,7 +38,7 @@ from lerobot.robots import (  # noqa: F401
     koch_follower,
     omx_follower,
 )
-from lerobot.utils.constants import OBS_LANGUAGE_ATTENTION_MASK, OBS_LANGUAGE_TOKENS, OBS_STR
+from lerobot.utils.constants import OBS_STR
 from lerobot.utils.control_utils import init_keyboard_listener, predict_action
 from lerobot.utils.utils import get_safe_torch_device, init_logging
 from lerobot.utils.visualization_utils import init_rerun, log_rerun_data
@@ -69,44 +67,6 @@ class InferenceConfig:
     def __get_path_fields__(cls) -> list[str]:
         """This enables the parser to load config from the policy using `--policy.path=local/dir`"""
         return ["policy"]
-
-
-def tokenize_instruction(policy, instruction: str, device: torch.device) -> tuple[torch.Tensor, torch.Tensor]:
-    """
-    Tokenize the instruction string for the VLA model.
-
-    Args:
-        policy: The pretrained policy (must have a tokenizer/processor)
-        instruction: The natural language instruction string
-        device: The device to place tensors on
-
-    Returns:
-        tuple: (language_tokens, language_attention_mask)
-    """
-    # Check if policy has a processor (for SmolVLA)
-    if hasattr(policy, "model") and hasattr(policy.model, "vlm_with_expert"):
-        processor = policy.model.vlm_with_expert.processor
-        tokenizer = processor.tokenizer
-
-        # Tokenize the instruction
-        # Add special formatting if needed (e.g., "Question: {instruction} Answer:")
-        formatted_instruction = f"Question: {instruction} Answer:"
-
-        tokens = tokenizer(
-            formatted_instruction,
-            return_tensors="pt",
-            padding=True,
-            truncation=True,
-        )
-
-        lang_tokens = tokens["input_ids"].to(device)
-        lang_masks = tokens["attention_mask"].to(device)
-
-        return lang_tokens, lang_masks
-    else:
-        # For policies that don't use language tokens (e.g., ACT), return None
-        logging.info("Policy does not use language tokens.")
-        return None, None
 
 
 @parser.wrap()
@@ -156,9 +116,7 @@ def main(cfg: InferenceConfig):
 
     device = get_safe_torch_device(policy.config.device)
 
-    # Tokenize the instruction once at the beginning
     logging.info(f"Instruction: {cfg.instruction}")
-    lang_tokens, lang_masks = tokenize_instruction(policy, cfg.instruction, device)
 
     # Reset policy and processors
     policy.reset()
@@ -189,11 +147,6 @@ def main(cfg: InferenceConfig):
 
             # Build observation frame from processed observations
             observation_frame = build_dataset_frame(robot_features, obs_processed, prefix=OBS_STR)
-
-            # Add language tokens to observation (only for VLA policies like SmolVLA)
-            if lang_tokens is not None:
-                observation_frame[OBS_LANGUAGE_TOKENS] = lang_tokens
-                observation_frame[OBS_LANGUAGE_ATTENTION_MASK] = lang_masks
 
             # Predict action using the policy
             action_values = predict_action(
